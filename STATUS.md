@@ -13,6 +13,10 @@
 - Stylesheet selectors using `:root` or relying on a separate SVG document no longer match (SVG is now inline in the card's shadow root).
 - Verify on iOS companion app resume.
 
+## 2026-11-07 — Deployed
+- Pushed, deployed, HA restarted. No persistent collapse so far; brief collapse on page load (Picture Elements does the same).
+- Holding further refinements until stability confirmed.
+
 ## Next
-- Initial commit of original file to GitHub (not done yet).
+- If the brief collapse matters: set `aspect_ratio` explicitly in config.
 - Consider deduplicating action handling in `FloorplanStateIcon` / `FloorplanActionButton`.
