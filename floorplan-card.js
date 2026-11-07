@@ -755,198 +755,252 @@ class OverlayManager {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main card element
+//
+// The SVG is fetched and inlined into the shadow DOM (rather than loaded via
+// an <object> element). <object> creates a nested browsing context that
+// WebKit frequently fails to (re)load when the iOS companion app resumes,
+// leaving the card collapsed with overlays bunched at the top.
+//
+// Optional config:
+//   aspect_ratio: 1.6   # width / height; reserves space before the SVG loads.
+//                       # If omitted, the ratio from the last successful load
+//                       # (cached in localStorage) is used.
 // ─────────────────────────────────────────────────────────────────────────────
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const SVG_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000, 15000];
+const RATIO_CACHE_PREFIX = 'floorplan-card:ratio:';
 
 class ActiveDrawing extends HTMLElement {
 
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
+    this._svg = null;
+    this._loadToken = 0;
+    this._retryTimer = null;
+    this._loading = false;
+    this._onWake = this._onWake.bind(this);
+  }
+
+  connectedCallback() {
+    document.addEventListener('visibilitychange', this._onWake);
+    window.addEventListener('online', this._onWake);
+    window.addEventListener('pageshow', this._onWake);
+    this._ensureSvg();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('visibilitychange', this._onWake);
+    window.removeEventListener('online', this._onWake);
+    window.removeEventListener('pageshow', this._onWake);
+  }
+
+  // App resumed / network back: if the SVG is missing, retry immediately
+  // instead of waiting for the next backoff step.
+  _onWake() {
+    if (document.visibilityState !== 'visible') return;
+    if (this._svg) return;
+    clearTimeout(this._retryTimer);
+    this._retryTimer = null;
+    this._loading = false;
+    this._ensureSvg();
+  }
+
+  _ensureSvg() {
+    if (this._svg || this._loading || !this.config || !this.isConnected) return;
+    this._loadSvg(0);
+  }
+
+  async _loadSvg(attempt) {
+    this._loading = true;
+    const token = ++this._loadToken;
+    const url = this.config.image;
+    try {
+      const res = await fetch(url, {
+        cache: attempt === 0 ? 'default' : 'no-cache',
+        credentials: 'same-origin',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      if (token !== this._loadToken) return; // superseded
+      this._installSvg(text);
+      this._loading = false;
+    } catch (e) {
+      if (token !== this._loadToken) return;
+      if (attempt < SVG_RETRY_DELAYS_MS.length) {
+        console.warn(`floorplan-card: SVG load failed (attempt ${attempt + 1}), retrying`, e);
+        this._retryTimer = setTimeout(() => {
+          this._retryTimer = null;
+          this._loadSvg(attempt + 1);
+        }, SVG_RETRY_DELAYS_MS[attempt]);
+      } else {
+        this._loading = false;
+        console.error('floorplan-card: SVG failed to load', e);
+        this._showError();
+      }
+    }
+  }
+
+  _showError() {
+    const msg = document.createElement('div');
+    msg.className = 'fp-error';
+    msg.textContent = 'Floorplan failed to load. Tap to retry.';
+    msg.addEventListener('click', () => {
+      this._holder.replaceChildren();
+      this._ensureSvg();
+    });
+    this._holder.replaceChildren(msg);
+  }
+
+  _installSvg(text) {
+    const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+    const src = doc.documentElement;
+    if (!src || src.localName !== 'svg' || doc.querySelector('parsererror')) {
+      throw new Error('Response is not a valid SVG');
+    }
+    const svg = document.importNode(src, true);
+
+    // Make the SVG scale to the card width. Ensure a viewBox exists, then
+    // drop fixed width/height so CSS controls sizing.
+    if (!svg.getAttribute('viewBox')) {
+      const w = parseFloat(svg.getAttribute('width'));
+      const h = parseFloat(svg.getAttribute('height'));
+      if (w > 0 && h > 0) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    }
+    svg.removeAttribute('width');
+    svg.removeAttribute('height');
+
+    // Reserve and remember the aspect ratio so future loads don't collapse
+    const vb = (svg.getAttribute('viewBox') ?? '').split(/[\s,]+/).map(Number);
+    if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
+      const ratio = vb[2] / vb[3];
+      this._holder.style.aspectRatio = String(ratio);
+      try { localStorage.setItem(RATIO_CACHE_PREFIX + this.config.image, String(ratio)); } catch (_) {}
+    }
+
+    // Inject the user stylesheet into the SVG (as before)
+    const style = document.createElementNS(SVG_NS, 'style');
+    style.textContent = `@import url("${this.config.stylesheet}");`;
+    svg.insertBefore(style, svg.firstChild);
+
+    this._holder.replaceChildren(svg);
+    this._svg = svg;
+
+    this._bindSvgActions();
+    this.updateStates();
+  }
+
+  // Element lookup inside the inlined SVG (ids may contain dots, so use
+  // getElementById rather than querySelector).
+  _getSvgEl(id) {
+    return this._svg ? this.shadowRoot.getElementById(id) : null;
+  }
+
+  _bindSvgActions() {
+    (this.config.groups ?? []).forEach(group => {
+      (group.entities ?? []).forEach(entity_id => {
+        const el = this._getSvgEl(entity_id);
+        if (!el) {
+          console.warn('floorplan-card: element with id missing in svg for configured entity ' + entity_id);
+          return;
+        }
+        const domain = entity_id.split('.')[0];
+        const isToggle = group.action?.service === 'toggle';
+        el.style.cursor = 'pointer';
+        // 'click' fires for both mouse and touch; listening to touchend as
+        // well caused toggles to fire twice on touch devices.
+        el.addEventListener('click', () => {
+          if (isToggle) {
+            this.myHass?.callService(domain, 'toggle', { entity_id });
+          } else {
+            const ev = new Event('hass-more-info', { bubbles: true, composed: true });
+            ev.detail = { entityId: entity_id };
+            this.dispatchEvent(ev);
+          }
+        });
+      });
+    });
   }
 
   updateStates() {
-    const svg_doc = this.image.getSVGDocument();
-    if(svg_doc && this.myHass)
-    {
-        var states = this.myHass.states;
+    if (!this._svg || !this.myHass || !this.config) return;
+    const states = this.myHass.states;
 
-        // For each group of the card's config
-        (this.config.groups ?? []).forEach(function(group)
-        {
-          // If the group has a "states" item
-          if("states" in group)
-          {
-              // Create a dictionary of state-dependent styles
-              var style_map = new Map();
-              group.states.forEach(function(state_obj)
-              {
-                style_map.set(state_obj.state, state_obj.class);
-              });
+    (this.config.groups ?? []).forEach(group => {
+      if ('states' in group) {
+        const style_map = new Map();
+        group.states.forEach(s => style_map.set(s.state, s.class));
 
-              // For each entity set the style according to the state
-              group.entities.forEach(function(entity_id)
-              {
-                const state = states[entity_id];
-                const state_str = state ? state.state : 'unavailable';
-                var style_class = style_map.get(state_str);
-                style_class = style_class ? style_class : 'default';
-                var entity = svg_doc.getElementById(entity_id);
-                if(entity){
-                    entity.setAttribute("class", style_class);
-                }else{
-                    console.warn("Cannot apply style class because svg is missing element with id " + entity_id);
-                }
-              });
-          }
-          // If the group has on_update: 'set_text'
-          if("on_update" in group && group.on_update == "set_text")
-          {
-              // For each entity write the current status into the svg element
-              group.entities.forEach(function(entity_id)
-              {
-                // Get entity and state
-                const entity = states[entity_id];
-                var state_str = entity.state;
-                // If there is a unit of measurement, append it
-                var unit = entity["attributes"]["unit_of_measurement"];
-                if(unit){
-                    state_str = state_str + unit;
-                }
-                // Get svg element and write text
-                var element = svg_doc.getElementById(entity_id);
-                if(element){
-                    // Is the actual text wrapped into a nested tspan?
-                    const tspans = element.getElementsByTagName("tspan");
-                    if(tspans.length == 1){
-                      element = tspans[0];
-                    }
-                    element.textContent = state_str;
-                }else{
-                    console.warn("Cannot set text because svg is missing element with id " + entity_id);
-                }
-              });
+        group.entities.forEach(entity_id => {
+          const state_str = states[entity_id]?.state ?? 'unavailable';
+          const style_class = style_map.get(state_str) || 'default';
+          const el = this._getSvgEl(entity_id);
+          if (el) {
+            el.setAttribute('class', style_class);
+          } else {
+            console.warn('floorplan-card: cannot apply style class because svg is missing element with id ' + entity_id);
           }
         });
-
-        // ── style_rules ──────────────────────────────────────────────────────
-        // Evaluates JS expressions against entity state and applies the result
-        // as inline style on arbitrary SVG elements.
-        //
-        // Config example:
-        //   style_rules:
-        //     - entity: binary_sensor.bathroom_door_opening
-        //       elements:
-        //         - id: doorBathroomOpen
-        //           style: "display: ${ entity.state === 'on' ? 'inline' : 'none' };"
-        //         - id: doorBathroomClosed
-        //           style: "display: ${ entity.state === 'on' ? 'none' : 'inline' };"
-        // ─────────────────────────────────────────────────────────────────────
-        (this.config.style_rules ?? []).forEach(rule => {
-          const stateObj = states[rule.entity];
-          if (!stateObj) return;
-          const entity = stateObj; // expose as 'entity' in expressions
-
-          (rule.elements ?? []).forEach(elCfg => {
-            const svgEl = svg_doc.getElementById(elCfg.id);
-            if (!svgEl) {
-              console.warn('chr-floorplan-card: style_rules could not find SVG element', elCfg.id);
-              return;
-            }
-            try {
-              // Replace ${ ... } expressions, then evaluate the full style string
-              const styleStr = elCfg.style.replace(/\$\{([^}]+)\}/g, (_, expr) => {
-                return Function('entity', `return (${expr})`)(entity);
-              });
-              svgEl.setAttribute('style', styleStr);
-            } catch(e) {
-              console.warn('chr-floorplan-card: style_rules expression error for', elCfg.id, e);
-            }
-          });
-        });
-    }
-  }
-
-  prepareSVGOnceLoaded() {
-    // Guard against race condition where onload fires before SVG DOM is ready.
-    // This is common on mobile. Retry up to 20 times with 100ms intervals.
-    const svg_doc = this.image.contentDocument;
-    if (!svg_doc || !svg_doc.querySelector('svg')) {
-      if ((this._svgRetryCount ?? 0) < 20) {
-        this._svgRetryCount = (this._svgRetryCount ?? 0) + 1;
-        setTimeout(() => this.prepareSVGOnceLoaded(), 100);
-      } else {
-        console.warn('floorplan-card: SVG failed to load after retries');
       }
-      return;
-    }
-    this._svgRetryCount = 0;
 
-    // Add the stylesheet to the svg file
-    var style = svg_doc.createElementNS("http://www.w3.org/2000/svg", "style");
-    // Make the browser load our css
-    style.textContent = '@import url("' + this.config.stylesheet + '");';
-    var svgElem = svg_doc.querySelector('svg');
-    svgElem.insertBefore(style, svgElem.firstChild);
+      if (group.on_update === 'set_text') {
+        group.entities.forEach(entity_id => {
+          const entity = states[entity_id];
+          if (!entity) return;
+          let state_str = entity.state;
+          const unit = entity.attributes?.unit_of_measurement;
+          if (unit) state_str += unit;
 
-    // Set onClick handlers for each entity in a group for actions and more-info dialogue
-    (this.config.groups ?? []).forEach(group => { // For each group of the card's config
-      // If the group has an "entities" item
-      if("entities" in group)
-      {
-          // For each of the entities
-          group.entities.forEach(entity_id => {
-            var domain = entity_id.split('.')[0];
-            var svg_element = svg_doc.getElementById(entity_id);
-
-            if(svg_element){ // Check if the entity is in the svg graph
-                // Action: Toggle on click/touch
-                if("action" in group && group.action.service == "toggle"){
-                    // Bind parameters to hass service action function
-                    const toggle_func = this.myHass.callService.bind(
-                          this.myHass, domain, 'toggle', { 'entity_id': entity_id }
-                    );
-                    // Click event for mouse
-                    svg_element.addEventListener('click', function(event){ toggle_func(); } );
-                    // Touch event for touchscreens
-                    svg_element.addEventListener('touchend', function(event){ toggle_func(); } );
-                // Default: Open more-info box on click/touch
-                }else{
-                    // Click event for mouse
-                    svg_element.addEventListener('click', e => {
-                            var new_event = new Event('hass-more-info');
-                            new_event.detail = {'entityId': entity_id};
-                            document.querySelector('home-assistant').dispatchEvent(new_event);
-                        }
-                    );
-                    // Touch event for touchscreens
-                    svg_element.addEventListener('touchend', e => {
-                            var new_event = new Event("hass-more-info");
-                            new_event.detail = {entityId: entity_id};
-                            document.querySelector('home-assistant').dispatchEvent(new_event);
-                            e.preventDefault();
-                        }
-                    );
-                }
-            }else{
-                console.warn("Element with id missing in svg for configured entity " + entity_id)
-            }
-          });
+          let el = this._getSvgEl(entity_id);
+          if (el) {
+            const tspans = el.getElementsByTagName('tspan');
+            if (tspans.length === 1) el = tspans[0];
+            el.textContent = state_str;
+          } else {
+            console.warn('floorplan-card: cannot set text because svg is missing element with id ' + entity_id);
+          }
+        });
       }
     });
 
-    // Update states and initialise overlays once SVG is ready
-    this.updateStates();
-    this._tryInitOverlays();
+    // ── style_rules ──────────────────────────────────────────────────────────
+    // Evaluates JS expressions against entity state and applies the result
+    // as inline style on arbitrary SVG elements.
+    //
+    //   style_rules:
+    //     - entity: binary_sensor.bathroom_door_opening
+    //       elements:
+    //         - id: doorBathroomOpen
+    //           style: "display: ${ entity.state === 'on' ? 'inline' : 'none' };"
+    // ─────────────────────────────────────────────────────────────────────────
+    (this.config.style_rules ?? []).forEach(rule => {
+      const entity = states[rule.entity];
+      if (!entity) return;
+      (rule.elements ?? []).forEach(elCfg => {
+        const svgEl = this._getSvgEl(elCfg.id);
+        if (!svgEl) {
+          console.warn('floorplan-card: style_rules could not find SVG element', elCfg.id);
+          return;
+        }
+        try {
+          const styleStr = elCfg.style.replace(/\$\{([^}]+)\}/g,
+            (_, expr) => Function('entity', `return (${expr})`)(entity));
+          svgEl.setAttribute('style', styleStr);
+        } catch (e) {
+          console.warn('floorplan-card: style_rules expression error for', elCfg.id, e);
+        }
+      });
+    });
   }
 
   _tryInitOverlays() {
     if (!this.config || !this.myHass || !this.content) return;
     if (!this._overlayManager) {
-      this.content.style.position = 'relative';
-      this.content.style.isolation = 'isolate';
       this._overlayManager = new OverlayManager(this.content, this.myHass);
     }
     this._overlayManager.render(this.config.overlays ?? []);
+    this._overlaysRendered = true;
   }
 
   setConfig(config) {
@@ -956,50 +1010,71 @@ class ActiveDrawing extends HTMLElement {
     if (!config.stylesheet) {
       throw new Error('You need to define a stylesheet');
     }
-    // entity and groups are only required when not using overlays-only config
     if (!config.entity && !config.overlays) {
       throw new Error('You need to define an entity or at least one overlay');
     }
+    const prev = this.config;
     this.config = config;
 
-    if(!this.content)
-    {
-      // Create basic structure of the card
+    if (!this.content) {
       const root = this.shadowRoot;
+      const css = document.createElement('style');
+      css.textContent = `
+        .fp-svg-holder { width: 100%; }
+        .fp-svg-holder > svg { display: block; width: 100%; height: auto; }
+        .fp-error {
+          padding: 16px; text-align: center; cursor: pointer;
+          color: var(--error-color, #db4437);
+        }
+      `;
+      root.appendChild(css);
+
       this.card = document.createElement('fp-card');
-      this.card.header = 'floorplan-card';
       this.content = document.createElement('div');
       this.content.style.padding = '0 4px 4px';
+      this.content.style.position = 'relative';
+      this.content.style.isolation = 'isolate';
 
-      // Add svg file to card and insert css style once loaded
-      this.image = document.createElement('object');
-      this.image.type = 'image/svg+xml';
-      this.image.data = this.config.image;
-      this.image.style = 'width: 100%';
-      this.image.id = "fp-image";
-      this.image.async = false;
-      this.image.onload = this.prepareSVGOnceLoaded.bind(this);
-
-      // Put all the HTML elements together and also add the title if available
-      this.content.appendChild(this.image);
+      this._holder = document.createElement('div');
+      this._holder.className = 'fp-svg-holder';
+      this.content.appendChild(this._holder);
       this.card.appendChild(this.content);
-      if(this.config.title){
+
+      if (config.title) {
         const title = document.createElement('h1');
-        title.innerHTML = this.config.title;
+        title.innerHTML = config.title;
         root.appendChild(title);
       }
       root.appendChild(this.card);
     }
+
+    // Reserve space before the SVG arrives so overlays are positioned correctly
+    let ratio = Number(config.aspect_ratio);
+    if (!(ratio > 0)) {
+      try { ratio = Number(localStorage.getItem(RATIO_CACHE_PREFIX + config.image)); } catch (_) {}
+    }
+    if (ratio > 0 && !this._svg) this._holder.style.aspectRatio = String(ratio);
+
+    // Reload SVG if a new image/stylesheet/groups was configured (e.g. editor)
+    if (prev && (prev.image !== config.image || prev.stylesheet !== config.stylesheet
+                 || prev.groups !== config.groups)) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+      this._loading = false;
+      this._loadToken++;
+      this._svg = null;
+      this._holder.replaceChildren();
+    }
+    this._ensureSvg();
+
+    if (prev && prev.overlays !== config.overlays) this._overlaysRendered = false;
+    if (!this._overlaysRendered) this._tryInitOverlays();
   }
 
   set hass(hass) {
-    // Store the hass object for use in other functions
     this.myHass = hass;
-
-    // Keep overlays in sync with state updates
+    if (!this._overlaysRendered) this._tryInitOverlays();
     this._overlayManager?.setHass(hass);
-
-    // Update states on the svg picture
     this.updateStates();
   }
 
