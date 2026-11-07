@@ -26,3 +26,4 @@
 - Create an editor UI for the card, similar to Picture Elements, so that state icons etc can be selected and positioned from the UI, rather than just from YAML.
 - Add support for camera notifications so that a camera icon can display a pop-up with the video stream (might exist in HA at a deeper level).
 - Add UI to configure overlays, visible states and color maps.
+- Thermostat and Electric Blanket Helper "Heat" class elements appear in black, not the default deep orange of the Picture Elements card. I suspect that the card is not passing through HA's standard icon colours, but applying its own. I recall we had some troulbe replicating the appearance of dimmed and tinted lamps, also.
