@@ -20,3 +20,9 @@
 ## Next
 - If the brief collapse matters: set `aspect_ratio` explicitly in config.
 - Consider deduplicating action handling in `FloorplanStateIcon` / `FloorplanActionButton`.
+
+## To Do
+- Adjust state label colour to support light/dark mode better. Use Picture Elements as a model
+- Create an editor UI for the card, similar to Picture Elements, so that state icons etc can be selected and positioned from the UI, rather than just from YAML.
+- Add support for camera notifications so that a camera icon can display a pop-up with the video stream (might exist in HA at a deeper level).
+- Add UI to configure overlays, visible states and color maps.
