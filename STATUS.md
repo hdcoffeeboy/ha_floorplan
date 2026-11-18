@@ -27,3 +27,4 @@
 - Add support for camera notifications so that a camera icon can display a pop-up with the video stream (might exist in HA at a deeper level).
 - Add UI to configure overlays, visible states and color maps.
 - Thermostat and Electric Blanket Helper "Heat" class elements appear in black, not the default deep orange of the Picture Elements card. I suspect that the card is not passing through HA's standard icon colours, but applying its own. I recall we had some troulbe replicating the appearance of dimmed and tinted lamps, also.
+- WashData icon colours are not reflected in the card. Work out how to support these natively, rather than reinvent or replicate the colours manually.
