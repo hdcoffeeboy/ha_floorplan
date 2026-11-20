@@ -28,3 +28,9 @@
 - Add UI to configure overlays, visible states and color maps.
 - Thermostat and Electric Blanket Helper "Heat" class elements appear in black, not the default deep orange of the Picture Elements card. I suspect that the card is not passing through HA's standard icon colours, but applying its own. I recall we had some troulbe replicating the appearance of dimmed and tinted lamps, also.
 - WashData icon colours are not reflected in the card. Work out how to support these natively, rather than reinvent or replicate the colours manually.
+## 2026-11-21 — Investigation: native state icon colours
+- Picture Elements `state-icon` = `hui-state-icon-element` → renders HA's `<state-badge>` with `stateColor: true` (frontend `src/components/entity/state-badge.ts`).
+- `state-badge` colour logic: `stateColorCss()` CSS-var cascade (`--state-<domain>-<device_class>-<state>-color` → `--state-<domain>-<state>-color` → `--state-<domain>-active|inactive-color` → `--state-active|inactive-color`), then `rgb_color`, then `filter: brightness((b+245)/5 %)`, then climate `hvac_action` → mode colour.
+- Thermostat black bug: our `themeColorForState` looks up `hvac_action` (`heating`) in a map keyed by mode (`heat`), falls through to `--primary-text-color`.
+- Plan: replace `ha-state-icon`/`ha-icon` + manual colours in `FloorplanStateIcon` with `<state-badge>`; delete colour helpers (lines ~17–233); keep `color_map` as inline host colour override with `stateColor=false`.
+- WashData: unverified. `state-badge` colours `sensor` entities only via `rgb_color` attribute or battery rules. Check the entity's attributes in Developer Tools.
