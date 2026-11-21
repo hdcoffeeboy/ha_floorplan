@@ -1,3 +1,23 @@
+/*
+ * SVG Floorplan Card for Home Assistant
+ * https://github.com/hdcoffeeboy/ha_floorplan
+ *
+ * Copyright 2026 hdcoffeeboy
+ * Licensed under the Apache License, Version 2.0 (see LICENSE).
+ *
+ * Based on floorplan-card by chr1st1ank (Apache 2.0), itself a fork of
+ * ha-floorplan by ExperienceLovelace (Apache 2.0). Modified from the
+ * original: inline SVG loading with retries, overlays (state icons, state
+ * labels, action buttons), native Home Assistant state colours, and a
+ * visual editor. Overlay behaviour inspired by Home Assistant's Picture
+ * Elements card.
+ */
+
+const CARD_VERSION = '1.0.0';
+console.info(`%c SVG-FLOORPLAN-CARD %c ${CARD_VERSION} `,
+  'color: white; background: #039be5; font-weight: 700;',
+  'color: #039be5; background: white; font-weight: 700;');
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Overlay position helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,7 +201,7 @@ class FloorplanStateIcon extends HTMLElement {
     fireOverlayAction(this, this._config, actionKey);
   }
 }
-customElements.define('floorplan-state-icon', FloorplanStateIcon);
+customElements.define('svg-floorplan-state-icon', FloorplanStateIcon);
 
 
 
@@ -268,7 +288,7 @@ class FloorplanStateLabel extends HTMLElement {
     this._span.style.cssText = style;
   }
 }
-customElements.define('floorplan-state-label', FloorplanStateLabel);
+customElements.define('svg-floorplan-state-label', FloorplanStateLabel);
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -410,7 +430,7 @@ class FloorplanActionButton extends HTMLElement {
     fireOverlayAction(this, this._config, actionKey);
   }
 }
-customElements.define('floorplan-action-button', FloorplanActionButton);
+customElements.define('svg-floorplan-action-button', FloorplanActionButton);
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,11 +458,11 @@ class OverlayManager {
 
     for (const [index, cfg] of overlays.entries()) {
       let el;
-      if      (cfg.type === 'state_icon')    el = document.createElement('floorplan-state-icon');
-      else if (cfg.type === 'state_label')   el = document.createElement('floorplan-state-label');
-      else if (cfg.type === 'action_button') el = document.createElement('floorplan-action-button');
+      if      (cfg.type === 'state_icon')    el = document.createElement('svg-floorplan-state-icon');
+      else if (cfg.type === 'state_label')   el = document.createElement('svg-floorplan-state-label');
+      else if (cfg.type === 'action_button') el = document.createElement('svg-floorplan-action-button');
       else {
-        console.warn('floorplan-card: unknown overlay type', cfg.type);
+        console.warn('svg-floorplan-card: unknown overlay type', cfg.type);
         continue;
       }
 
@@ -507,7 +527,7 @@ const roundPct = v => Math.round(v * 10) / 10;
 class ActiveDrawing extends HTMLElement {
 
   static getConfigElement() {
-    return document.createElement('floorplan-card-editor');
+    return document.createElement('svg-floorplan-card-editor');
   }
 
   static getStubConfig() {
@@ -751,14 +771,14 @@ class ActiveDrawing extends HTMLElement {
     } catch (e) {
       if (token !== this._loadToken) return;
       if (attempt < SVG_RETRY_DELAYS_MS.length) {
-        console.warn(`floorplan-card: SVG load failed (attempt ${attempt + 1}), retrying`, e);
+        console.warn(`svg-floorplan-card: SVG load failed (attempt ${attempt + 1}), retrying`, e);
         this._retryTimer = setTimeout(() => {
           this._retryTimer = null;
           this._loadSvg(attempt + 1);
         }, SVG_RETRY_DELAYS_MS[attempt]);
       } else {
         this._loading = false;
-        console.error('floorplan-card: SVG failed to load', e);
+        console.error('svg-floorplan-card: SVG failed to load', e);
         this._showError();
       }
     }
@@ -824,7 +844,7 @@ class ActiveDrawing extends HTMLElement {
       (group.entities ?? []).forEach(entity_id => {
         const el = this._getSvgEl(entity_id);
         if (!el) {
-          console.warn('floorplan-card: element with id missing in svg for configured entity ' + entity_id);
+          console.warn('svg-floorplan-card: element with id missing in svg for configured entity ' + entity_id);
           return;
         }
         const domain = entity_id.split('.')[0];
@@ -861,7 +881,7 @@ class ActiveDrawing extends HTMLElement {
           if (el) {
             el.setAttribute('class', style_class);
           } else {
-            console.warn('floorplan-card: cannot apply style class because svg is missing element with id ' + entity_id);
+            console.warn('svg-floorplan-card: cannot apply style class because svg is missing element with id ' + entity_id);
           }
         });
       }
@@ -880,7 +900,7 @@ class ActiveDrawing extends HTMLElement {
             if (tspans.length === 1) el = tspans[0];
             el.textContent = state_str;
           } else {
-            console.warn('floorplan-card: cannot set text because svg is missing element with id ' + entity_id);
+            console.warn('svg-floorplan-card: cannot set text because svg is missing element with id ' + entity_id);
           }
         });
       }
@@ -902,7 +922,7 @@ class ActiveDrawing extends HTMLElement {
       (rule.elements ?? []).forEach(elCfg => {
         const svgEl = this._getSvgEl(elCfg.id);
         if (!svgEl) {
-          console.warn('floorplan-card: style_rules could not find SVG element', elCfg.id);
+          console.warn('svg-floorplan-card: style_rules could not find SVG element', elCfg.id);
           return;
         }
         try {
@@ -910,7 +930,7 @@ class ActiveDrawing extends HTMLElement {
             (_, expr) => Function('entity', `return (${expr})`)(entity));
           svgEl.setAttribute('style', styleStr);
         } catch (e) {
-          console.warn('floorplan-card: style_rules expression error for', elCfg.id, e);
+          console.warn('svg-floorplan-card: style_rules expression error for', elCfg.id, e);
         }
       });
     });
@@ -1017,7 +1037,7 @@ class ActiveDrawing extends HTMLElement {
     return 8;
   }
 }
-customElements.define('floorplan-card', ActiveDrawing);
+customElements.define('svg-floorplan-card', ActiveDrawing);
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1192,7 +1212,7 @@ function loadEditorDeps() {
     const card = await helpers?.createCardElement({ type: 'entities', entities: [] });
     await card?.constructor?.getConfigElement?.();
     await customElements.whenDefined('ha-form');
-  })().catch(e => console.warn('floorplan-card: editor components failed to load', e));
+  })().catch(e => console.warn('svg-floorplan-card: editor components failed to load', e));
   return editorDepsReady;
 }
 
@@ -1455,10 +1475,13 @@ class FloorplanCardEditor extends HTMLElement {
     root.querySelector('.overlay-form').append(this._overlayForm);
   }
 }
-customElements.define('floorplan-card-editor', FloorplanCardEditor);
+customElements.define('svg-floorplan-card-editor', FloorplanCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
-    type: "floorplan-card",
-    name: "Floorplan Card"
+  type: 'svg-floorplan-card',
+  name: 'SVG Floorplan Card',
+  description: 'Interactive SVG floorplan styled by entity state, with positionable state icons, labels and action buttons.',
+  preview: false,
+  documentationURL: 'https://github.com/hdcoffeeboy/ha_floorplan',
 });

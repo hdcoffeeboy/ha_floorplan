@@ -1,0 +1,10 @@
+SVG Floorplan Card
+Copyright 2026 hdcoffeeboy
+
+This product is based on floorplan-card by chr1st1ank
+(https://github.com/chr1st1ank/floorplan-card), licensed under the
+Apache License 2.0, itself a fork of ha-floorplan by ExperienceLovelace
+(https://github.com/ExperienceLovelace/ha-floorplan), licensed under the
+Apache License 2.0.
+
+Overlay behaviour inspired by Home Assistant's Picture Elements card.

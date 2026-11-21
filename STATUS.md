@@ -90,3 +90,12 @@ Plan for floorplan-card (vanilla JS, no Lit/build):
 - Empty fields removed from saved YAML.
 - `getStubConfig` added so the card can be added from the card picker.
 - To verify: forms load; edits update preview; add/reorder/delete; actions picker values work on dashboard (toggle, more-info, perform-action, navigate); existing YAML actions (incl. call-service, tap_action.entity) still work; saved YAML clean.
+
+## 2026-11-21 — Marketplace (HACS) release prep (committed on branch `hacs-release`; based on `editor-forms`; neither merged to main)
+- Card type renamed `custom:floorplan-card` → `custom:svg-floorplan-card` (clashed with ExperienceLovelace ha-floorplan); internal elements prefixed `svg-floorplan-`. No alias. Own dashboards need `type:` updated.
+- Licence: Apache 2.0 (required by upstream: floorplan-card by chr1st1ank, fork of ExperienceLovelace ha-floorplan, both Apache 2.0, no upstream NOTICE files). Added LICENSE, NOTICE, header in floorplan-card.js marking modifications.
+- Added `hacs.json` (filename `floorplan-card.js`, min HA 2026.11.0), `.github/workflows/validate.yml` (hacs/action, category plugin), full README, `CARD_VERSION = '1.0.0'` console banner, card picker description.
+- User to do: add `images/screenshot.png` (HACS image check); confirm min HA version; GitHub repo description, topics, issues enabled; merge; push; run validation; publish release v1.0.0; then submit PR to hacs/default (plugin list) if wanted.
+- Decide whether STATUS.md stays in the public repo.
+- README has no upgrade section (card was private; no public history).
+- PAUSED: user living with `hacs-release` build for an extended test cycle before release. Resume with the "User to do" list above, then merge `hacs-release` into main.
