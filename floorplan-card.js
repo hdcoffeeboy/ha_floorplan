@@ -470,7 +470,7 @@ class OverlayManager {
     this._elements.forEach(el => el.remove());
     this._elements = [];
 
-    for (const cfg of overlays) {
+    for (const [index, cfg] of overlays.entries()) {
       let el;
       if      (cfg.type === 'state_icon')    el = document.createElement('floorplan-state-icon');
       else if (cfg.type === 'state_label')   el = document.createElement('floorplan-state-label');
@@ -488,6 +488,7 @@ class OverlayManager {
         'pointer-events: auto',
       ].join(';');
 
+      el._fpIndex = index; // position in config.overlays, for the editor
       el.config = cfg;
       el.hass   = this._hass;
 
@@ -516,7 +517,32 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const SVG_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000, 15000];
 const RATIO_CACHE_PREFIX = 'floorplan-card:ratio:';
 
+// SVG text by URL. The editor preview rebuilds the card on every config
+// change; this avoids refetching (and flickering) each time.
+const svgTextCache = new Map();
+
+// ── Visual editor shared helpers ────────────────────────────────────────────
+// The editor hands a live bridge object to the preview card under this
+// symbol: object spreads keep it, saving to YAML drops it.
+const FP_EDITOR_BRIDGE = Symbol.for('floorplan-card-editor-bridge');
+const EDITOR_DRAG_THRESHOLD_PX = 4;
+const PERCENT_RE = /^\s*[+-]?(\d+(\.\d*)?|\.\d+)%\s*$/;
+
+// Only overlays placed in percent (or not at all) can be dragged; px or
+// calc() positions are left alone rather than converted.
+function isMovableOverlay(cfg) {
+  return [cfg.x, cfg.y].every(v =>
+    v == null || v === '' || v === 0 || v === '0' || PERCENT_RE.test(String(v)));
+}
+
+const clampPct = v => Math.min(100, Math.max(0, v));
+const roundPct = v => Math.round(v * 10) / 10;
+
 class ActiveDrawing extends HTMLElement {
+
+  static getConfigElement() {
+    return document.createElement('floorplan-card-editor');
+  }
 
   constructor() {
     super();
@@ -526,19 +552,192 @@ class ActiveDrawing extends HTMLElement {
     this._retryTimer = null;
     this._loading = false;
     this._onWake = this._onWake.bind(this);
+    this._preview = false;
+    this._press = undefined;
+    this._onBridgeChanged = () => this._updateEditing();
+    this._onPressDown   = this._onPressDown.bind(this);
+    this._onPressMove   = this._onPressMove.bind(this);
+    this._onPressUp     = this._onPressUp.bind(this);
+    this._onPressCancel = this._onPressCancel.bind(this);
+    this._blockAction   = this._blockAction.bind(this);
   }
 
   connectedCallback() {
     document.addEventListener('visibilitychange', this._onWake);
     window.addEventListener('online', this._onWake);
     window.addEventListener('pageshow', this._onWake);
+    this._bridge?.addEventListener('changed', this._onBridgeChanged);
     this._ensureSvg();
+    this._updateEditing();
   }
 
   disconnectedCallback() {
     document.removeEventListener('visibilitychange', this._onWake);
     window.removeEventListener('online', this._onWake);
     window.removeEventListener('pageshow', this._onWake);
+    this._bridge?.removeEventListener('changed', this._onBridgeChanged);
+  }
+
+  // ── Editor preview ────────────────────────────────────────────────────────
+  // HA sets `preview` on the card shown in the card editor. When the
+  // floorplan editor is open (bridge active), clicks and drags on the
+  // preview select and position overlays instead of running their actions.
+  // Mirrors Picture Elements' editor-preview-controller.
+
+  set preview(value) {
+    this._preview = !!value;
+    this._updateEditing();
+  }
+
+  get preview() {
+    return this._preview;
+  }
+
+  get _editor() {
+    return this._preview && this._bridge?.active ? this._bridge : undefined;
+  }
+
+  _setBridge(bridge) {
+    if (bridge === this._bridge) return;
+    if (this.isConnected) {
+      this._bridge?.removeEventListener('changed', this._onBridgeChanged);
+      bridge?.addEventListener('changed', this._onBridgeChanged);
+    }
+    this._bridge = bridge;
+    this._updateEditing();
+  }
+
+  _overlayEls() {
+    return this._overlayManager?._elements ?? [];
+  }
+
+  _updateEditing() {
+    if (!this.content) return;
+    const editor = this._editor;
+    this.content.classList.toggle('fp-editing', !!editor);
+    const overlays = this.config?.overlays ?? [];
+    for (const el of this._overlayEls()) {
+      el.toggleAttribute('fp-selected', !!editor && el._fpIndex === editor.selectedIndex);
+      el.toggleAttribute('fp-movable', !!editor && isMovableOverlay(overlays[el._fpIndex] ?? {}));
+    }
+  }
+
+  _bindEditorEvents() {
+    const c = this.content;
+    const capture = { capture: true };
+    c.addEventListener('pointerdown', this._onPressDown, capture);
+    c.addEventListener('pointermove', this._onPressMove);
+    c.addEventListener('pointerup', this._onPressUp);
+    c.addEventListener('pointercancel', this._onPressCancel);
+    c.addEventListener('lostpointercapture', this._onPressCancel);
+    for (const type of ['click', 'dblclick', 'contextmenu', 'dragstart']) {
+      c.addEventListener(type, this._blockAction, capture);
+    }
+  }
+
+  _overlayIndex(ev) {
+    for (const node of ev.composedPath()) {
+      if (node === this.content) break;
+      if (node._fpIndex !== undefined) return node._fpIndex;
+    }
+    return undefined;
+  }
+
+  // Overlay's left/top in percent of the container, as laid out.
+  _overlayPosition(index) {
+    const el = this._overlayEls().find(e => e._fpIndex === index);
+    const c = this.content;
+    if (!el || !c.clientWidth || !c.clientHeight) return undefined;
+    const style = getComputedStyle(el);
+    return {
+      left: (parseFloat(style.left) / c.clientWidth) * 100,
+      top:  (parseFloat(style.top)  / c.clientHeight) * 100,
+    };
+  }
+
+  // Capture phase, so overlays and SVG groups don't see the press.
+  _onPressDown(ev) {
+    const editor = this._editor;
+    if (!editor) return;
+    ev.stopPropagation();
+    if (!ev.isPrimary || ev.button !== 0 || ev.ctrlKey) return;
+    ev.preventDefault();
+    const index = this._overlayIndex(ev);
+    const cfg = index !== undefined ? this.config.overlays?.[index] : undefined;
+    this.content.setPointerCapture(ev.pointerId);
+    this._press = {
+      pointerId: ev.pointerId,
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+      index,
+      start: cfg && isMovableOverlay(cfg) ? this._overlayPosition(index) : undefined,
+    };
+  }
+
+  _onPressMove(ev) {
+    const press = this._press;
+    if (!press || ev.pointerId !== press.pointerId) return;
+    if (!ev.buttons || !this._editor) { this._onPressCancel(ev); return; }
+    const dx = ev.clientX - press.clientX;
+    const dy = ev.clientY - press.clientY;
+    if (!press.dragged && Math.hypot(dx, dy) < EDITOR_DRAG_THRESHOLD_PX) return;
+    press.dragged = true;
+    if (!press.start) return;
+    const c = this.content;
+    press.moved = {
+      left: clampPct(press.start.left + (dx / c.clientWidth) * 100),
+      top:  clampPct(press.start.top  + (dy / c.clientHeight) * 100),
+    };
+    const el = this._overlayEls().find(e => e._fpIndex === press.index);
+    el?.style.setProperty('left', `${press.moved.left}%`);
+    el?.style.setProperty('top', `${press.moved.top}%`);
+    c.classList.add('fp-dragging');
+  }
+
+  _onPressUp(ev) {
+    const press = this._press;
+    if (!press || ev.pointerId !== press.pointerId) return;
+    const editor = this._editor;
+    if (!editor) { this._onPressCancel(ev); return; }
+    this._endPress();
+    if (press.moved) {
+      editor.handlers.moveOverlay(press.index, press.moved.left, press.moved.top);
+    } else if (press.dragged) {
+      // A drag that moved nothing is not a click.
+    } else if (press.index !== undefined) {
+      editor.handlers.selectOverlay(press.index);
+    } else {
+      const rect = this.content.getBoundingClientRect();
+      editor.handlers.clickImage(
+        clampPct(((ev.clientX - rect.left) / this.content.clientWidth) * 100),
+        clampPct(((ev.clientY - rect.top) / this.content.clientHeight) * 100),
+      );
+    }
+  }
+
+  // Also bound to lostpointercapture.
+  _onPressCancel(ev) {
+    const press = this._press;
+    if (!press || ev.pointerId !== press.pointerId) return;
+    this._endPress();
+    if (!press.moved) return;
+    // Put the overlay back where its config places it.
+    const el = this._overlayEls().find(e => e._fpIndex === press.index);
+    const cfg = this.config.overlays?.[press.index] ?? {};
+    el?.style.setProperty('left', String(cfg.x ?? '0'));
+    el?.style.setProperty('top', String(cfg.y ?? '0'));
+  }
+
+  _endPress() {
+    this._press = undefined;
+    this.content.classList.remove('fp-dragging');
+  }
+
+  // Capture phase: stop clicks, menus and native drags while editing.
+  _blockAction(ev) {
+    if (!this._editor) return;
+    ev.stopPropagation();
+    ev.preventDefault();
   }
 
   // App resumed / network back: if the SVG is missing, retry immediately
@@ -562,14 +761,18 @@ class ActiveDrawing extends HTMLElement {
     const token = ++this._loadToken;
     const url = this.config.image;
     try {
-      const res = await fetch(url, {
-        cache: attempt === 0 ? 'default' : 'no-cache',
-        credentials: 'same-origin',
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
+      let text = attempt === 0 ? svgTextCache.get(url) : undefined;
+      if (text === undefined) {
+        const res = await fetch(url, {
+          cache: attempt === 0 ? 'default' : 'no-cache',
+          credentials: 'same-origin',
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        text = await res.text();
+      }
       if (token !== this._loadToken) return; // superseded
       this._installSvg(text);
+      svgTextCache.set(url, text);
       this._loading = false;
     } catch (e) {
       if (token !== this._loadToken) return;
@@ -746,6 +949,7 @@ class ActiveDrawing extends HTMLElement {
     }
     this._overlayManager.render(this.config.overlays ?? []);
     this._overlaysRendered = true;
+    this._updateEditing();
   }
 
   setConfig(config) {
@@ -771,6 +975,16 @@ class ActiveDrawing extends HTMLElement {
           padding: 16px; text-align: center; cursor: pointer;
           color: var(--error-color, #db4437);
         }
+        /* Editor preview */
+        .fp-editing > * { cursor: pointer; }
+        .fp-editing > [fp-movable] {
+          cursor: grab; touch-action: none;
+          outline: 1px dashed var(--primary-color); outline-offset: 2px;
+        }
+        .fp-editing > [fp-selected] {
+          outline: 2px solid var(--primary-color); outline-offset: 2px;
+        }
+        .fp-editing.fp-dragging, .fp-editing.fp-dragging > * { cursor: grabbing; }
       `;
       root.appendChild(css);
 
@@ -779,6 +993,7 @@ class ActiveDrawing extends HTMLElement {
       this.content.style.padding = '0 4px 4px';
       this.content.style.position = 'relative';
       this.content.style.isolation = 'isolate';
+      this._bindEditorEvents();
 
       this._holder = document.createElement('div');
       this._holder.className = 'fp-svg-holder';
@@ -814,6 +1029,7 @@ class ActiveDrawing extends HTMLElement {
 
     if (prev && prev.overlays !== config.overlays) this._overlaysRendered = false;
     if (!this._overlaysRendered) this._tryInitOverlays();
+    this._setBridge(config[FP_EDITOR_BRIDGE]);
   }
 
   set hass(hass) {
@@ -828,6 +1044,225 @@ class ActiveDrawing extends HTMLElement {
   }
 }
 customElements.define('floorplan-card', ActiveDrawing);
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visual editor (minimal)
+// Lists overlays and their positions. Click an overlay in the preview to
+// select it, drag it to move it, or click the image to place the selected
+// overlay. Everything else is edited in YAML for now.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Hand-overs in a row that may go without the bridge coming back (e.g. a
+// parent editor that drops symbols).
+const MAX_BRIDGE_HAND_OVERS = 10;
+
+class FloorplanEditorBridge extends EventTarget {
+  constructor(handlers) {
+    super();
+    this.handlers = handlers;
+    this.active = false;
+    this.selectedIndex = undefined;
+    this._handOvers = 0;
+  }
+
+  setState(active, selectedIndex) {
+    if (active === this.active && selectedIndex === this.selectedIndex) return;
+    this.active = active;
+    this.selectedIndex = selectedIndex;
+    this.dispatchEvent(new Event('changed'));
+  }
+
+  // Configs from outside the editor (the first one, YAML edits) arrive
+  // without the bridge, so the editor must pass them on with it attached.
+  needsHandOver(config) {
+    if (config[FP_EDITOR_BRIDGE] === this) {
+      this._handOvers = 0;
+      return false;
+    }
+    if (this._handOvers >= MAX_BRIDGE_HAND_OVERS) return false;
+    this._handOvers++;
+    return true;
+  }
+}
+
+class FloorplanCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._selected = undefined;
+    this._bridge = new FloorplanEditorBridge({
+      selectOverlay: index => this._select(index),
+      moveOverlay: (index, x, y) => this._setPosition(index, `${roundPct(x)}%`, `${roundPct(y)}%`),
+      clickImage: (x, y) => {
+        if (this._selected !== undefined) {
+          this._setPosition(this._selected, `${roundPct(x)}%`, `${roundPct(y)}%`);
+        }
+      },
+    });
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+  }
+
+  setConfig(config) {
+    this._config = config;
+    if (this._selected !== undefined && !config.overlays?.[this._selected]) {
+      this._selected = undefined;
+      this._updateBridge();
+    }
+    this._render();
+    this._handOver();
+  }
+
+  connectedCallback() {
+    this._updateBridge();
+    this._handOver();
+  }
+
+  disconnectedCallback() {
+    // YAML mode or dialog closed: the preview behaves like a normal card.
+    this._bridge.setState(false);
+  }
+
+  _updateBridge() {
+    this._bridge.setState(this.isConnected, this._selected);
+  }
+
+  _handOver() {
+    if (this.isConnected && this._config && this._bridge.needsHandOver(this._config)) {
+      this._fireConfigChanged(this._config);
+    }
+  }
+
+  _fireConfigChanged(config) {
+    this.dispatchEvent(new CustomEvent('config-changed', {
+      detail: { config: { ...config, [FP_EDITOR_BRIDGE]: this._bridge } },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  _select(index) {
+    this._selected = index;
+    this._updateBridge();
+    this._render();
+  }
+
+  _setPosition(index, x, y) {
+    const overlays = [...(this._config?.overlays ?? [])];
+    const overlay = overlays[index];
+    if (!overlay) return;
+    overlays[index] = { ...overlay, x, y };
+    this._config = { ...this._config, overlays };
+    this._selected = index;
+    this._updateBridge();
+    this._render();
+    this._fireConfigChanged(this._config);
+  }
+
+  _overlayName(cfg) {
+    const type = { state_icon: 'Icon', state_label: 'Label', action_button: 'Button' }[cfg.type] ?? cfg.type;
+    const what = cfg.entity ?? cfg.label ?? cfg.tap_action?.entity ?? cfg.icon ?? '';
+    return what ? `${type}: ${what}` : type;
+  }
+
+  _render() {
+    if (!this._config) return;
+    const overlays = this._config.overlays ?? [];
+    const root = this.shadowRoot;
+    root.innerHTML = `
+      <style>
+        :host { display: block; }
+        .hint {
+          margin: 0 0 12px; padding: 8px 12px; border-radius: 8px;
+          background: var(--secondary-background-color);
+          color: var(--secondary-text-color); font-size: 14px;
+        }
+        .row {
+          display: flex; align-items: center; gap: 8px; width: 100%;
+          box-sizing: border-box; padding: 8px 12px; margin: 0 0 4px;
+          border: 1px solid var(--divider-color); border-radius: 8px;
+          background: none; color: var(--primary-text-color);
+          font: inherit; text-align: left; cursor: pointer;
+        }
+        .row.selected { border-color: var(--primary-color); outline: 1px solid var(--primary-color); }
+        .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pos { color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
+        .fixed { color: var(--secondary-text-color); font-size: 12px; }
+        .detail { display: flex; gap: 8px; align-items: center; margin: 8px 0 12px; }
+        .detail label { display: flex; gap: 4px; align-items: center; color: var(--secondary-text-color); }
+        .detail input {
+          width: 80px; padding: 6px 8px; border-radius: 6px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color); color: var(--primary-text-color); font: inherit;
+        }
+        .detail button {
+          margin-left: auto; padding: 6px 12px; border-radius: 6px; border: none;
+          background: none; color: var(--primary-color); font: inherit; cursor: pointer;
+        }
+        .empty { color: var(--secondary-text-color); }
+      </style>
+      <p class="hint">Click an overlay in the preview to select it, drag it to move it, or click the floorplan to place the selected overlay. Edit other settings in the code editor.</p>
+      <div class="list"></div>
+    `;
+    const list = root.querySelector('.list');
+    if (!overlays.length) {
+      list.innerHTML = '<p class="empty">No overlays configured.</p>';
+      return;
+    }
+    overlays.forEach((cfg, index) => {
+      const row = document.createElement('button');
+      row.className = 'row' + (index === this._selected ? ' selected' : '');
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = this._overlayName(cfg);
+      const pos = document.createElement('span');
+      pos.className = 'pos';
+      pos.textContent = `${cfg.x ?? '0'}, ${cfg.y ?? '0'}`;
+      row.append(name, pos);
+      if (!isMovableOverlay(cfg)) {
+        const fixed = document.createElement('span');
+        fixed.className = 'fixed';
+        fixed.textContent = 'not %';
+        fixed.title = 'Position is not in percent, so it cannot be dragged';
+        row.append(fixed);
+      }
+      row.addEventListener('click', () => this._select(index));
+      list.append(row);
+
+      if (index === this._selected) list.append(this._renderDetail(cfg, index));
+    });
+  }
+
+  _renderDetail(cfg, index) {
+    const detail = document.createElement('div');
+    detail.className = 'detail';
+    const field = (axis) => {
+      const label = document.createElement('label');
+      label.textContent = axis;
+      const input = document.createElement('input');
+      input.value = String(cfg[axis] ?? '0');
+      input.addEventListener('change', () => {
+        const value = input.value.trim();
+        const current = this._config.overlays[index];
+        this._setPosition(index,
+          axis === 'x' ? value : current.x,
+          axis === 'y' ? value : current.y);
+      });
+      label.append(input);
+      return label;
+    };
+    const done = document.createElement('button');
+    done.textContent = 'Done';
+    done.addEventListener('click', () => this._select(undefined));
+    detail.append(field('x'), field('y'), done);
+    return detail;
+  }
+}
+customElements.define('floorplan-card-editor', FloorplanCardEditor);
+
 window.customCards = window.customCards || [];
 window.customCards.push({
     type: "floorplan-card",

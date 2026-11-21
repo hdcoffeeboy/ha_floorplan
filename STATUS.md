@@ -64,7 +64,7 @@ Plan for floorplan-card (vanilla JS, no Lit/build):
 
 ## Next steps (agreed 2026-11-21)
 1. DONE: native state icon colours and action button theming tested and merged.
-2. Then start visual editor with step 2 (preview click/drag positioning + minimal editor: overlay list and positions). Test early that the config Symbol bridge reaches a custom card's preview.
+2. DONE: step 2 built, verified and merged.
 3. Then step 1 (full editor forms), then step 3.
 
 ## 2026-11-21 — Action button theming (merged to main)
@@ -73,3 +73,11 @@ Plan for floorplan-card (vanilla JS, no Lit/build):
 - Text colour verified in light and dark mode. (A grey/white background seen in testing came from a `background` in the button's own YAML `style:`, not the card.)
 - Added hover/press tint using HA's `--ha-color-fill-primary-quiet-hover` / `-active` (same tokens as `ha-button`). Hover only on devices with a pointer. An inline `style: background` overrides it.
 - Hover and press tint verified in light and dark mode.
+
+## 2026-11-21 — Visual editor step 2 (merged to main)
+- `floorplan-card-editor` (via `getConfigElement`): hint, overlay list with x/y, selected overlay gets editable x/y fields + Done. Other settings: code editor.
+- Bridge (`FloorplanEditorBridge`) attached to config under `Symbol.for('floorplan-card-editor-bridge')`; hand-over limited to 10 like Picture Elements.
+- Preview (`ActiveDrawing`, only when HA sets `preview` and editor is open): click overlay = select, drag (>4px) = move, click floorplan = place selected. Writes `x`/`y` as % to 0.1. Overlay and SVG group actions blocked while editing. Movable overlays dashed outline, selected solid.
+- Only % (or unset) positions are draggable; others marked "not %".
+- HA rebuilds the preview card on every config change: SVG text now cached in memory per URL to avoid refetch/flicker.
+- Verified 2026-11-21: bridge reaches preview; select/drag/place work; save/discard correct; dashboard card unaffected; saved YAML clean.
