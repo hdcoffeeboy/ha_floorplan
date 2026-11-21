@@ -14,229 +14,11 @@ function resolveTransform(anchor, scale) {
   return scale && scale !== 1 ? `${translate} scale(${scale})` : translate;
 }
 
-// Default state colours per domain, mirroring HA frontend theme conventions
-const DOMAIN_STATE_COLORS = {
-  light:          { on: 'var(--state-light-active-color, #fdd835)',
-                    off: 'var(--state-light-inactive-color, #7b7b7b)' },
-  switch:         { on: 'var(--state-switch-active-color, #43a047)',
-                    off: 'var(--state-switch-inactive-color, #7b7b7b)' },
-  binary_sensor:  { on: 'var(--state-binary_sensor-active-color, #43a047)',
-                    off: 'var(--state-binary_sensor-inactive-color, #7b7b7b)' },
-  climate:        { heat: 'var(--state-climate-heat-color, #ff8100)',
-                    cool: 'var(--state-climate-cool-color, #2196f3)',
-                    heat_cool: 'var(--state-climate-heat_cool-color, #fb8c00)',
-                    auto: 'var(--state-climate-auto-color, #00acc1)',
-                    dry:  'var(--state-climate-dry-color, #efb400)',
-                    fan_only: 'var(--state-climate-fan_only-color, #43a047)',
-                    idle: 'var(--state-climate-idle-color, #7b7b7b)',
-                    off:  'var(--state-climate-off-color, #7b7b7b)' },
-  fan:            { on: 'var(--state-fan-active-color, #43a047)',
-                    off: 'var(--state-fan-inactive-color, #7b7b7b)' },
-  cover:          { open: 'var(--state-cover-active-color, #43a047)',
-                    closed: 'var(--state-cover-inactive-color, #7b7b7b)' },
-  lock:           { unlocked: 'var(--state-lock-active-color, #ff8100)',
-                    locked: 'var(--state-lock-inactive-color, #43a047)' },
-  alarm_control_panel: { disarmed: 'var(--state-alarm_control_panel-inactive-color, #43a047)',
-                         armed_away: 'var(--state-alarm_control_panel-active-color, #ff8100)',
-                         armed_home: 'var(--state-alarm_control_panel-active-color, #ff8100)',
-                         triggered: 'var(--state-alarm_control_panel-triggered-color, #f44336)' },
-  person:         { home: 'var(--state-person-home-color, #43a047)',
-                    not_home: 'var(--state-person-not_home-color, #7b7b7b)' },
-  device_tracker: { home: 'var(--state-device_tracker-home-color, #43a047)',
-                    not_home: 'var(--state-device_tracker-not_home-color, #7b7b7b)' },
-  input_boolean:  { on: 'var(--state-input_boolean-active-color, #43a047)',
-                    off: 'var(--state-input_boolean-inactive-color, #7b7b7b)' },
-  valve:          { open: 'var(--state-valve-active-color, #43a047)',
-                    closed: 'var(--state-valve-inactive-color, #7b7b7b)' },
-  media_player:   { playing: 'var(--state-media_player-active-color, #43a047)',
-                    paused:  'var(--state-media_player-active-color, #43a047)',
-                    idle:    'var(--state-media_player-inactive-color, #7b7b7b)',
-                    off:     'var(--state-media_player-inactive-color, #7b7b7b)' },
-};
-
-// Battery colour is derived from level attribute rather than state string.
-// Mirrors HA frontend: red < 20%, amber < 50%, green >= 50%.
-// Also handles charging (amber) and discharging states.
-function batteryColor(stateObj) {
-  const state = stateObj?.state ?? 'unknown';
-  const attrs = stateObj?.attributes ?? {};
-
-  // sensor.*_battery or device_class: battery
-  const level = parseFloat(attrs.battery_level ?? state);
-  const isCharging = attrs.battery_charging === true
-    || (typeof attrs.charger_type === 'string' && attrs.charger_type !== 'none')
-    || state === 'charging';
-
-  if (isCharging) return 'var(--state-sensor-battery-charging-color, #fb8c00)';
-  if (isNaN(level)) return 'var(--primary-text-color)';
-  if (level < 20)   return 'var(--state-sensor-battery-low-color, #f44336)';
-  if (level < 50)   return 'var(--state-sensor-battery-medium-color, #fb8c00)';
-  return 'var(--state-sensor-battery-high-color, #43a047)';
-}
-
-// Read a CSS variable from the HA document root (outside shadow DOM)
-// so theme variables are honoured correctly.
-function getThemeVar(varName, fallback) {
-  const val = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-  return val || fallback;
-}
-
-// Map entity state to the appropriate HA theme CSS variable, then resolve it.
-function themeColorForState(entityId, state, stateObj) {
-  const domain = entityId ? entityId.split('.')[0] : null;
-  const deviceClass = stateObj?.attributes?.device_class;
-
-  // Unavailable / unknown — always grey regardless of domain
-  if (state === 'unavailable' || state === 'unknown') {
-    return getThemeVar('--state-unavailable-color', '#bdbdbd');
-  }
-
-  // Battery sensors — level-based colour
-  if (deviceClass === 'battery' || entityId?.toLowerCase().includes('battery')) {
-    return batteryColor(stateObj);
-  }
-
-  // Domain + state -> CSS variable name, mirroring HA frontend conventions
-  const varMap = {
-    light:         { on: '--state-light-active-color' },
-    switch:        { on: '--state-switch-active-color' },
-    binary_sensor: { on: '--state-binary_sensor-active-color' },
-    climate: {
-      heat:      '--state-climate-heat-color',
-      cool:      '--state-climate-cool-color',
-      heat_cool: '--state-climate-heat_cool-color',
-      auto:      '--state-climate-auto-color',
-      dry:       '--state-climate-dry-color',
-      fan_only:  '--state-climate-fan_only-color',
-    },
-    fan:           { on: '--state-fan-active-color' },
-    cover:         { open: '--state-cover-active-color' },
-    lock:          { unlocked: '--state-lock-active-color' },
-    valve:         { open: '--state-valve-active-color' },
-    media_player:  { playing: '--state-media_player-active-color',
-                     paused:  '--state-media_player-active-color' },
-    alarm_control_panel: {
-      armed_away:  '--state-alarm_control_panel-active-color',
-      armed_home:  '--state-alarm_control_panel-active-color',
-      triggered:   '--state-alarm_control_panel-triggered-color',
-    },
-    person:        { home: '--state-person-home-color' },
-    device_tracker:{ home: '--state-device_tracker-home-color' },
-    input_boolean: { on: '--state-input_boolean-active-color' },
-  };
-
-  // For climate entities, use hvac_action if available — it reflects what
-  // the unit is actually doing (idle/heating/cooling) rather than the mode
-  const effectiveState = (domain === 'climate' && stateObj?.attributes?.hvac_action)
-    ? stateObj.attributes.hvac_action
-    : state;
-
-  // Only use domain-specific variable if it resolves to a real value
-  const domainVars = varMap[domain];
-  if (domainVars?.[effectiveState]) {
-    const resolved = getThemeVar(domainVars[effectiveState], '');
-    if (resolved) return resolved;
-  }
-
-  // Also check inactiveStates using effectiveState
-  const inactiveStates = ['off', 'closed', 'locked', 'not_home', 'idle'];
-  if (inactiveStates.includes(effectiveState)) {
-    return getThemeVar('--state-icon-color',
-             getThemeVar('--state-inactive-color', '#7b7b7b'));
-  }
-
-
-
-  return getThemeVar('--primary-text-color', '#ffffff');
-}
-
-function defaultColorForState(entityId, state, stateObj) {
-  const domain = entityId ? entityId.split('.')[0] : null;
-
-  // Battery sensors — colour by level regardless of domain
-  const deviceClass = stateObj?.attributes?.device_class;
-  if (deviceClass === 'battery' || (domain === 'sensor' && entityId?.toLowerCase().includes('battery'))) {
-    return batteryColor(stateObj);
-  }
-
-  return DOMAIN_STATE_COLORS[domain]?.[state] ?? 'var(--primary-text-color)';
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Light colour helpers
-// Mirrors HA frontend logic for deriving icon colour from light attributes.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Convert colour temperature in Kelvin to an approximate RGB value.
-// Uses a simplified Tanner Helland algorithm.
-function kelvinToRgb(kelvin) {
-  const t = Math.min(Math.max(kelvin, 1000), 40000) / 100;
-  let r, g, b;
-
-  // Red
-  if (t <= 66) {
-    r = 255;
-  } else {
-    r = 329.698727446 * Math.pow(t - 60, -0.1332047592);
-    r = Math.min(Math.max(r, 0), 255);
-  }
-
-  // Green
-  if (t <= 66) {
-    g = 99.4708025861 * Math.log(t) - 161.1195681661;
-  } else {
-    g = 288.1221695283 * Math.pow(t - 60, -0.0755148492);
-  }
-  g = Math.min(Math.max(g, 0), 255);
-
-  // Blue
-  if (t >= 66) {
-    b = 255;
-  } else if (t <= 19) {
-    b = 0;
-  } else {
-    b = 138.5177312231 * Math.log(t - 10) - 305.0447927307;
-    b = Math.min(Math.max(b, 0), 255);
-  }
-
-  return [Math.round(r), Math.round(g), Math.round(b)];
-}
-
-// Derive the best colour for a light entity icon.
-// Priority: rgb_color > color_temp_kelvin > warm white fallback > off grey
-function lightIconColor(stateObj) {
-  if (!stateObj || stateObj.state === 'off') {
-    return DOMAIN_STATE_COLORS.light.off;
-  }
-
-  const attr = stateObj.attributes;
-
-  // Derive base RGB colour
-  let r, g, b;
-  if (attr.rgb_color) {
-    [r, g, b] = attr.rgb_color;
-  } else if (attr.color_temp_kelvin) {
-    [r, g, b] = kelvinToRgb(attr.color_temp_kelvin);
-  } else if (attr.color_temp) {
-    [r, g, b] = kelvinToRgb(Math.round(1000000 / attr.color_temp));
-  } else {
-    [r, g, b] = kelvinToRgb(2700);
-  }
-
-  // Apply brightness as a CSS filter, exactly as picture-elements does:
-  // color = raw rgb_color, filter = brightness(x%) where x is derived from
-  // the brightness attribute. HA uses roughly: pct = brightness/255 * 100
-  // but with a minimum so icons don't go black.
-  const bri = attr.brightness != null ? attr.brightness / 255 : 1.0;
-  const filterPct = Math.round(Math.max(20, Math.pow(bri, 0.35) * 100));
-
-  return { color: `rgb(${r},${g},${b})`, filter: `brightness(${filterPct}%)` };
-}
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // State icon overlay
-// Renders an MDI icon whose appearance is driven by entity state.
+// Renders HA's native <state-badge> (the same element Picture Elements'
+// state-icon uses), so icon colours, light tint/dimming, climate hvac_action
+// colours and theme variables all come from Home Assistant.
 //
 // Config example:
 //   type: state_icon
@@ -244,14 +26,35 @@ function lightIconColor(stateObj) {
 //   x: 42%
 //   y: 35%
 //   anchor: center        # center | top-left | top-right | bottom-left | bottom-right
-//   size: 24              # icon size in px, default 24
-//   icon_map:
+//   scale: 1              # optional size multiplier
+//   icon_map:             # optional per-state icon
 //     "on":  mdi:lightbulb
 //     "off": mdi:lightbulb-off
-//   color_map:
+//   color_map:            # optional per-state colour; overrides HA's colour
 //     "on":  "#f5c518"
 //     "off": "var(--secondary-text-color)"
+//   visible_states: [on]  # optional; hide icon in other states
+//   entity_picture: false # optional; never show media player artwork
 // ─────────────────────────────────────────────────────────────────────────────
+
+// <state-badge> is registered lazily by the HA frontend. Loading the card
+// helpers imports the Picture Elements elements, which define it.
+const stateBadgeReady = customElements.get('state-badge')
+  ? Promise.resolve()
+  : Promise.resolve(window.loadCardHelpers?.())
+      .catch(() => {})
+      .then(() => customElements.whenDefined('state-badge'));
+
+// Strip entity pictures so <state-badge> shows the icon instead.
+function withoutPicture(stateObj) {
+  if (!stateObj?.attributes?.entity_picture && !stateObj?.attributes?.entity_picture_local) {
+    return stateObj;
+  }
+  return {
+    ...stateObj,
+    attributes: { ...stateObj.attributes, entity_picture: undefined, entity_picture_local: undefined },
+  };
+}
 
 class FloorplanStateIcon extends HTMLElement {
   constructor() {
@@ -260,37 +63,24 @@ class FloorplanStateIcon extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; }
-        ha-state-icon { display: block; }
-        ha-icon { display: block; }
-        :host([actionable]) ha-state-icon { cursor: pointer; }
-        :host([actionable]) ha-icon { cursor: pointer; }
-        :host([actionable]) img.entity-picture { cursor: pointer; }
-        img.entity-picture {
-          display: block;
-          border-radius: 50%;
-          object-fit: cover;
-          width: 40px;
-          height: 40px;
-        }
+        state-badge { display: flex; width: 24px; height: 24px; }
+        state-badge.picture { width: 40px; height: 40px; }
+        :host([actionable]) state-badge { cursor: pointer; }
       </style>
-      <ha-state-icon></ha-state-icon>
-      <ha-icon style="display:none"></ha-icon>
-      <img class="entity-picture" style="display:none" alt="">
+      <state-badge></state-badge>
     `;
-    this._icon    = this.shadowRoot.querySelector('ha-state-icon');
-    this._haIcon  = this.shadowRoot.querySelector('ha-icon');
-    this._img     = this.shadowRoot.querySelector('img.entity-picture');
+    this._badge = this.shadowRoot.querySelector('state-badge');
+    this._dirty = true;
 
     this._tapCount  = 0;
     this._tapTimer  = null;
     this._holdTimer = null;
 
-    // Attach pointer events to all elements
-    for (const el of [this._icon, this._haIcon, this._img]) {
-      el.addEventListener('pointerdown',   this._onPointerDown.bind(this));
-      el.addEventListener('pointerup',     this._onPointerUp.bind(this));
-      el.addEventListener('pointercancel', this._onPointerCancel.bind(this));
-    }
+    this._badge.addEventListener('pointerdown',   this._onPointerDown.bind(this));
+    this._badge.addEventListener('pointerup',     this._onPointerUp.bind(this));
+    this._badge.addEventListener('pointercancel', this._onPointerCancel.bind(this));
+
+    stateBadgeReady.then(() => { this._dirty = true; this._update(); });
   }
 
   set hass(hass) {
@@ -300,6 +90,7 @@ class FloorplanStateIcon extends HTMLElement {
 
   set config(config) {
     this._config = config;
+    this._dirty = true;
     if (config.tap_action || config.hold_action || config.double_tap_action) {
       this.setAttribute('actionable', '');
     }
@@ -307,91 +98,38 @@ class FloorplanStateIcon extends HTMLElement {
   }
 
   _update() {
-    if (!this._config || !this._hass) return;
+    if (!this._config || !this._hass || !customElements.get('state-badge')) return;
     const entityId = this._config.entity;
     const stateObj = this._hass.states[entityId];
+    // hass updates fire for every entity change; skip if ours hasn't changed
+    if (!this._dirty && stateObj === this._lastStateObj) return;
+    this._dirty = false;
+    this._lastStateObj = stateObj;
+
     const state = stateObj ? stateObj.state : 'unknown';
     const domain = entityId ? entityId.split('.')[0] : null;
 
-    // For media players with album art, show thumbnail instead of icon
-    const entityPicture = stateObj?.attributes?.entity_picture;
-    const showPicture = domain === 'media_player'
-      && entityPicture
-      && ['playing', 'paused'].includes(state)
-      && this._config.entity_picture !== false;
-
-    if (showPicture) {
-      // Determine size from scale — approximate icon footprint
-      const scale = this._config.scale ?? 1;
-      const size = Math.round(40 * scale);
-      this._img.style.cssText = `display:block;width:${size}px;height:${size}px;`;
-      this._img.src = entityPicture;
-      this._icon.style.display = 'none';
-    } else {
-      this._img.style.display = 'none';
-
-      // Resolve which icon to show — icon_map > config icon > entity default
-      const iconMap = this._config.icon_map ?? {};
-      const resolvedIcon = iconMap[state] ?? this._config.icon ?? null;
-
-      // Use ha-icon for custom icon sets (non-mdi prefix), ha-state-icon otherwise
-      const isCustomIcon = resolvedIcon && !resolvedIcon.startsWith('mdi:');
-
-      if (isCustomIcon) {
-        // ha-icon handles custom brand icon sets (phu:, hue:, etc.)
-        this._icon.style.display = 'none';
-        this._haIcon.style.display = '';
-        this._haIcon.setAttribute('icon', resolvedIcon);
-
-        const colorMap = this._config.color_map ?? {};
-        if (colorMap[state]) {
-          this._haIcon.style.color = colorMap[state];
-          this._haIcon.style.filter = '';
-        } else if (domain === 'light') {
-          const lc = lightIconColor(stateObj);
-          this._haIcon.style.color = lc.color;
-          this._haIcon.style.filter = lc.filter;
-        } else {
-          this._haIcon.style.color = defaultColorForState(entityId, state, stateObj);
-          this._haIcon.style.filter = '';
-        }
-      } else {
-        // ha-state-icon for mdi: and default entity icons
-        this._haIcon.style.display = 'none';
-        this._icon.style.display = '';
-        this._icon.hass = this._hass;
-        this._icon.stateObj = stateObj;
-
-        if (resolvedIcon) {
-          this._icon.setAttribute('icon', resolvedIcon);
-        } else {
-          this._icon.removeAttribute('icon');
-        }
-
-        // Hide overlay if state is not in visible_states list
     const visibleStates = this._config.visible_states;
     if (visibleStates && !visibleStates.includes(state)) {
       this.style.display = 'none';
       return;
-    } else {
-      this.style.display = '';
     }
+    this.style.display = '';
 
-    const colorMap = this._config.color_map ?? {};
-        this._icon.style.filter = '';
-        if (colorMap[state]) {
-          this._icon.style.color = colorMap[state];
-        } else if (domain === 'light' && state === 'on') {
-          const lc2 = lightIconColor(stateObj);
-          this._icon.style.color = lc2.color;
-          this._icon.style.filter = lc2.filter;
-        } else {
-          this._icon.style.color = themeColorForState(entityId, state, stateObj);
-        }
-      }
-    }
+    // Artwork only for media players that are playing/paused (existing behaviour)
+    const showPicture = domain === 'media_player'
+      && ['playing', 'paused'].includes(state)
+      && this._config.entity_picture !== false;
 
-    // Scale via transform on the host element is handled by OverlayManager
+    const iconMap = this._config.icon_map ?? {};
+    const colorOverride = (this._config.color_map ?? {})[state];
+
+    const badge = this._badge;
+    badge.classList.toggle('picture', showPicture && !!stateObj?.attributes?.entity_picture);
+    badge.stateObj = showPicture ? stateObj : withoutPicture(stateObj);
+    badge.overrideIcon = iconMap[state] ?? this._config.icon ?? undefined;
+    badge.stateColor = !colorOverride;
+    badge.style.color = colorOverride ?? '';
   }
 
   _onPointerDown() {
@@ -588,10 +326,17 @@ class FloorplanActionButton extends HTMLElement {
           gap: 4px;
           padding: 4px 8px;
           border-radius: 6px;
-          background: rgba(0,0,0,0.45);
-          color: var(--state-icon-color, #44739e);
+          /* Match Picture Elements' action button (plain ha-button) */
+          background: none;
+          color: var(--primary-color);
+          font-weight: var(--ha-font-weight-medium, 500);
           font-size: 12px;
+          transition: background-color 0.15s;
         }
+        @media (hover: hover) {
+          .btn:hover { background-color: var(--ha-color-fill-primary-quiet-hover); }
+        }
+        .btn:active { background-color: var(--ha-color-fill-primary-quiet-active); }
         ha-icon { width: 18px; height: 18px; }
       </style>
       <div class="btn">
