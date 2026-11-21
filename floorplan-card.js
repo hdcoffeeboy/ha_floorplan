@@ -14,6 +14,22 @@ function resolveTransform(anchor, scale) {
   return scale && scale !== 1 ? `${translate} scale(${scale})` : translate;
 }
 
+// Run an overlay action through Home Assistant's own action handler (the
+// `hass-action` event handled at the app root), so every standard action
+// works: toggle, more-info, perform-action/call-service, navigate, url,
+// assist, with confirmation. `entity` may sit on the action (legacy
+// floorplan style) or on the overlay.
+function fireOverlayAction(node, overlayConfig, actionKey) {
+  const actionCfg = overlayConfig?.[actionKey];
+  if (!actionCfg || actionCfg.action === 'none') return;
+  const ev = new Event('hass-action', { bubbles: true, composed: true });
+  ev.detail = {
+    config: { entity: actionCfg.entity ?? overlayConfig.entity, [actionKey]: actionCfg },
+    action: actionKey.replace(/_action$/, ''),
+  };
+  node.dispatchEvent(ev);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // State icon overlay
 // Renders HA's native <state-badge> (the same element Picture Elements'
@@ -162,30 +178,7 @@ class FloorplanStateIcon extends HTMLElement {
   }
 
   _fireAction(actionKey) {
-    const actionCfg = this._config?.[actionKey];
-    if (!actionCfg || actionCfg.action === 'none' || !this._hass) return;
-
-    const action = actionCfg.action;
-    const entity = actionCfg.entity ?? this._config.entity;
-    const domain  = entity ? entity.split('.')[0] : null;
-
-    if (action === 'toggle' && domain && entity) {
-      this._hass.callService(domain, 'toggle', { entity_id: entity });
-    } else if (action === 'more-info' && entity) {
-      const ev = new Event('hass-more-info', { bubbles: true, composed: true });
-      ev.detail = { entityId: entity };
-      this.dispatchEvent(ev);
-    } else if (action === 'call-service') {
-      const [svcDomain, svcName] = (actionCfg.service ?? '').split('.');
-      if (svcDomain && svcName) {
-        this._hass.callService(svcDomain, svcName, actionCfg.service_data ?? {});
-      }
-    } else if (action === 'navigate' && actionCfg.navigation_path) {
-      history.pushState(null, '', actionCfg.navigation_path);
-      window.dispatchEvent(new PopStateEvent('popstate'));
-    } else if (action === 'url' && actionCfg.url_path) {
-      window.open(actionCfg.url_path, actionCfg.url_target ?? '_blank');
-    }
+    fireOverlayAction(this, this._config, actionKey);
   }
 }
 customElements.define('floorplan-state-icon', FloorplanStateIcon);
@@ -414,34 +407,7 @@ class FloorplanActionButton extends HTMLElement {
   }
 
   _fireAction(actionKey) {
-    const actionCfg = this._config?.[actionKey];
-    if (!actionCfg || actionCfg.action === 'none' || !this._hass) return;
-
-    const action  = actionCfg.action;
-    const entity  = actionCfg.entity ?? this._config.entity;
-    const domain  = entity ? entity.split('.')[0] : null;
-
-    if (action === 'toggle' && domain && entity) {
-      this._hass.callService(domain, 'toggle', { entity_id: entity });
-
-    } else if (action === 'more-info' && entity) {
-      const ev = new Event('hass-more-info', { bubbles: true, composed: true });
-      ev.detail = { entityId: entity };
-      this.dispatchEvent(ev);
-
-    } else if (action === 'call-service') {
-      const [svcDomain, svcName] = (actionCfg.service ?? '').split('.');
-      if (svcDomain && svcName) {
-        this._hass.callService(svcDomain, svcName, actionCfg.service_data ?? {});
-      }
-
-    } else if (action === 'navigate' && actionCfg.navigation_path) {
-      history.pushState(null, '', actionCfg.navigation_path);
-      window.dispatchEvent(new PopStateEvent('popstate'));
-
-    } else if (action === 'url' && actionCfg.url_path) {
-      window.open(actionCfg.url_path, actionCfg.url_target ?? '_blank');
-    }
+    fireOverlayAction(this, this._config, actionKey);
   }
 }
 customElements.define('floorplan-action-button', FloorplanActionButton);
@@ -542,6 +508,14 @@ class ActiveDrawing extends HTMLElement {
 
   static getConfigElement() {
     return document.createElement('floorplan-card-editor');
+  }
+
+  static getStubConfig() {
+    return {
+      image: '/local/floorplan/floorplan.svg',
+      stylesheet: '/local/floorplan/floorplan.css',
+      overlays: [],
+    };
   }
 
   constructor() {
@@ -1047,10 +1021,10 @@ customElements.define('floorplan-card', ActiveDrawing);
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visual editor (minimal)
-// Lists overlays and their positions. Click an overlay in the preview to
-// select it, drag it to move it, or click the image to place the selected
-// overlay. Everything else is edited in YAML for now.
+// Visual editor
+// Card options and an overlay list (add, reorder, delete). Selecting an
+// overlay (in the list or the preview) opens its form; in the preview, drag
+// it to move it or click the floorplan to place it. Built on HA's ha-form.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Hand-overs in a row that may go without the bridge coming back (e.g. a
@@ -1086,24 +1060,161 @@ class FloorplanEditorBridge extends EventTarget {
   }
 }
 
+// ── Editor form schemas (HA ha-form / selectors) ────────────────────────────
+
+const OVERLAY_TYPES = {
+  state_icon:    'State icon',
+  state_label:   'State label',
+  action_button: 'Action button',
+};
+
+const ANCHOR_OPTIONS = ['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right']
+  .map(value => ({ value, label: value }));
+
+const CARD_SCHEMA = [
+  { name: 'image', required: true, selector: { text: {} } },
+  { name: 'stylesheet', required: true, selector: { text: {} } },
+  { name: 'title', selector: { text: {} } },
+  { name: 'aspect_ratio', selector: { number: { min: 0.1, max: 10, step: 0.01, mode: 'box' } } },
+  {
+    name: '', type: 'expandable', title: 'SVG groups and style rules (YAML)',
+    schema: [
+      { name: 'groups', selector: { object: {} } },
+      { name: 'style_rules', selector: { object: {} } },
+    ],
+  },
+];
+
+const POSITION_SCHEMA = {
+  name: '', type: 'grid',
+  schema: [
+    { name: 'x', selector: { text: {} } },
+    { name: 'y', selector: { text: {} } },
+    { name: 'anchor', selector: { select: { mode: 'dropdown', options: ANCHOR_OPTIONS } } },
+    { name: 'scale', selector: { number: { min: 0.1, max: 10, step: 0.1, mode: 'box' } } },
+  ],
+};
+
+const ACTIONS_SCHEMA = {
+  name: '', type: 'expandable', title: 'Interactions',
+  schema: ['tap_action', 'hold_action', 'double_tap_action'].map(name => ({
+    name, selector: { ui_action: { default_action: 'none' } },
+  })),
+};
+
+const OVERLAY_SCHEMAS = {
+  state_icon: [
+    { name: 'entity', required: true, selector: { entity: {} } },
+    { name: 'icon', selector: { icon: {} }, context: { icon_entity: 'entity' } },
+    POSITION_SCHEMA,
+    { name: 'visible_states', selector: { select: { multiple: true, custom_value: true, options: [] } } },
+    { name: 'entity_picture', default: true, selector: { boolean: {} } },
+    {
+      name: '', type: 'expandable', title: 'Per-state icons and colours (YAML)',
+      schema: [
+        { name: 'icon_map', selector: { object: {} } },
+        { name: 'color_map', selector: { object: {} } },
+      ],
+    },
+    ACTIONS_SCHEMA,
+  ],
+  state_label: [
+    { name: 'entity', selector: { entity: {} } },
+    { name: 'attribute', selector: { attribute: {} }, context: { filter_entity: 'entity' } },
+    { name: 'suffix', selector: { text: {} } },
+    { name: 'template', selector: { text: { multiline: true } } },
+    POSITION_SCHEMA,
+    { name: 'style', selector: { object: {} } },
+  ],
+  action_button: [
+    { name: 'label', selector: { text: {} } },
+    { name: 'icon', selector: { icon: {} } },
+    { name: 'entity', selector: { entity: {} } },
+    POSITION_SCHEMA,
+    { name: 'style', selector: { object: {} } },
+    ACTIONS_SCHEMA,
+  ],
+};
+
+const FIELD_LABELS = {
+  image: 'SVG image URL',
+  stylesheet: 'Stylesheet URL',
+  title: 'Title',
+  aspect_ratio: 'Aspect ratio (width ÷ height)',
+  groups: 'Groups',
+  style_rules: 'Style rules',
+  entity: 'Entity',
+  icon: 'Icon',
+  label: 'Label',
+  x: 'X (% from left)',
+  y: 'Y (% from top)',
+  anchor: 'Anchor',
+  scale: 'Scale',
+  visible_states: 'Only show in states',
+  entity_picture: 'Show media artwork',
+  icon_map: 'Icon per state',
+  color_map: 'Colour per state',
+  attribute: 'Attribute',
+  suffix: 'Suffix',
+  template: 'Template',
+  style: 'Style (CSS)',
+  tap_action: 'Tap action',
+  hold_action: 'Hold action',
+  double_tap_action: 'Double tap action',
+};
+
+const FIELD_HELPERS = {
+  image: 'e.g. /local/floorplan/home.svg',
+  stylesheet: 'e.g. /local/floorplan/home.css',
+  aspect_ratio: 'Reserves space before the SVG loads. Optional.',
+  entity: 'For button actions: the entity used by Toggle and More info.',
+  template: "Supports {{ states('entity') }} and {{ state_attr('entity', 'attr') }}. Overrides attribute.",
+};
+
+// Drop empty values so the saved YAML stays clean.
+function cleanConfig(config) {
+  const out = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (value === undefined || value === '' ||
+        (Array.isArray(value) && !value.length)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+// ha-form and its selectors are loaded lazily by HA. Opening a built-in
+// card's editor loads them.
+let editorDepsReady;
+function loadEditorDeps() {
+  editorDepsReady ??= (async () => {
+    if (customElements.get('ha-form')) return;
+    const helpers = await window.loadCardHelpers?.();
+    const card = await helpers?.createCardElement({ type: 'entities', entities: [] });
+    await card?.constructor?.getConfigElement?.();
+    await customElements.whenDefined('ha-form');
+  })().catch(e => console.warn('floorplan-card: editor components failed to load', e));
+  return editorDepsReady;
+}
+
 class FloorplanCardEditor extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
     this._selected = undefined;
+    this._view = undefined;
     this._bridge = new FloorplanEditorBridge({
       selectOverlay: index => this._select(index),
-      moveOverlay: (index, x, y) => this._setPosition(index, `${roundPct(x)}%`, `${roundPct(y)}%`),
+      moveOverlay: (index, x, y) => this._setPosition(index, x, y),
       clickImage: (x, y) => {
-        if (this._selected !== undefined) {
-          this._setPosition(this._selected, `${roundPct(x)}%`, `${roundPct(y)}%`);
-        }
+        if (this._selected !== undefined) this._setPosition(this._selected, x, y);
       },
     });
+    loadEditorDeps().then(() => { this._view = undefined; this._render(); });
   }
 
   set hass(hass) {
     this._hass = hass;
+    this.shadowRoot.querySelectorAll('ha-form').forEach(f => { f.hass = hass; });
   }
 
   setConfig(config) {
@@ -1137,6 +1248,7 @@ class FloorplanCardEditor extends HTMLElement {
   }
 
   _fireConfigChanged(config) {
+    this._config = config;
     this.dispatchEvent(new CustomEvent('config-changed', {
       detail: { config: { ...config, [FP_EDITOR_BRIDGE]: this._bridge } },
       bubbles: true,
@@ -1150,115 +1262,197 @@ class FloorplanCardEditor extends HTMLElement {
     this._render();
   }
 
+  _setOverlays(overlays) {
+    this._fireConfigChanged({ ...this._config, overlays });
+    this._render();
+  }
+
   _setPosition(index, x, y) {
     const overlays = [...(this._config?.overlays ?? [])];
-    const overlay = overlays[index];
-    if (!overlay) return;
-    overlays[index] = { ...overlay, x, y };
-    this._config = { ...this._config, overlays };
+    if (!overlays[index]) return;
+    overlays[index] = { ...overlays[index], x: `${roundPct(x)}%`, y: `${roundPct(y)}%` };
     this._selected = index;
     this._updateBridge();
-    this._render();
-    this._fireConfigChanged(this._config);
+    this._setOverlays(overlays);
+  }
+
+  _addOverlay(type) {
+    const overlays = [...(this._config.overlays ?? []), { type, x: '50%', y: '50%' }];
+    this._selected = overlays.length - 1;
+    this._updateBridge();
+    this._setOverlays(overlays);
+  }
+
+  _moveOverlay(index, delta) {
+    const overlays = [...(this._config.overlays ?? [])];
+    const target = index + delta;
+    if (target < 0 || target >= overlays.length) return;
+    [overlays[index], overlays[target]] = [overlays[target], overlays[index]];
+    this._setOverlays(overlays);
+  }
+
+  _deleteOverlay(index) {
+    const overlays = [...(this._config.overlays ?? [])];
+    overlays.splice(index, 1);
+    this._setOverlays(overlays);
   }
 
   _overlayName(cfg) {
-    const type = { state_icon: 'Icon', state_label: 'Label', action_button: 'Button' }[cfg.type] ?? cfg.type;
-    const what = cfg.entity ?? cfg.label ?? cfg.tap_action?.entity ?? cfg.icon ?? '';
-    return what ? `${type}: ${what}` : type;
+    const type = OVERLAY_TYPES[cfg.type] ?? cfg.type ?? 'Overlay';
+    const entity = cfg.entity ?? cfg.tap_action?.entity;
+    const name = entity ? this._hass?.states[entity]?.attributes?.friendly_name ?? entity : cfg.label;
+    return name ? `${type}: ${name}` : type;
+  }
+
+  _makeForm(schema, onChange) {
+    const form = document.createElement('ha-form');
+    form.hass = this._hass;
+    form.schema = schema;
+    form.computeLabel = s => FIELD_LABELS[s.name] ?? s.name;
+    form.computeHelper = s => FIELD_HELPERS[s.name];
+    form.addEventListener('value-changed', ev => {
+      ev.stopPropagation();
+      onChange(ev.detail.value);
+    });
+    return form;
   }
 
   _render() {
     if (!this._config) return;
-    const overlays = this._config.overlays ?? [];
-    const root = this.shadowRoot;
-    root.innerHTML = `
+    if (!customElements.get('ha-form')) return; // re-rendered once loaded
+    const overlay = this._selected !== undefined ? this._config.overlays?.[this._selected] : undefined;
+    const view = overlay ? `overlay:${this._selected}:${overlay.type}` : 'main';
+    if (view !== this._view) {
+      this._view = view;
+      overlay ? this._buildOverlayView(overlay) : this._buildMainView();
+    }
+    if (overlay) {
+      this._overlayForm.data = overlay;
+      this._overlayTitle.textContent = this._overlayName(overlay);
+      this._movableHint.hidden = !isMovableOverlay(overlay);
+    } else {
+      this._cardForm.data = this._config;
+      this._renderList();
+    }
+  }
+
+  _styles() {
+    return `
       <style>
         :host { display: block; }
         .hint {
-          margin: 0 0 12px; padding: 8px 12px; border-radius: 8px;
+          margin: 12px 0; padding: 8px 12px; border-radius: 8px;
           background: var(--secondary-background-color);
           color: var(--secondary-text-color); font-size: 14px;
         }
+        h3 { margin: 16px 0 8px; font-size: 16px; font-weight: 500; }
         .row {
-          display: flex; align-items: center; gap: 8px; width: 100%;
-          box-sizing: border-box; padding: 8px 12px; margin: 0 0 4px;
+          display: flex; align-items: center; gap: 4px;
+          padding: 4px 4px 4px 12px; margin: 0 0 4px;
           border: 1px solid var(--divider-color); border-radius: 8px;
-          background: none; color: var(--primary-text-color);
-          font: inherit; text-align: left; cursor: pointer;
         }
-        .row.selected { border-color: var(--primary-color); outline: 1px solid var(--primary-color); }
-        .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .pos { color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
-        .fixed { color: var(--secondary-text-color); font-size: 12px; }
-        .detail { display: flex; gap: 8px; align-items: center; margin: 8px 0 12px; }
-        .detail label { display: flex; gap: 4px; align-items: center; color: var(--secondary-text-color); }
-        .detail input {
-          width: 80px; padding: 6px 8px; border-radius: 6px;
-          border: 1px solid var(--divider-color);
-          background: var(--card-background-color); color: var(--primary-text-color); font: inherit;
+        .name {
+          flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          cursor: pointer; padding: 6px 0;
         }
-        .detail button {
-          margin-left: auto; padding: 6px 12px; border-radius: 6px; border: none;
-          background: none; color: var(--primary-color); font: inherit; cursor: pointer;
+        .pos { color: var(--secondary-text-color); font-size: 12px; font-variant-numeric: tabular-nums; }
+        .add { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+        button {
+          padding: 6px 10px; border-radius: 6px; border: none; background: none;
+          color: var(--primary-color); font: inherit; cursor: pointer;
         }
+        button:hover { background: var(--ha-color-fill-primary-quiet-hover, var(--secondary-background-color)); }
+        button:disabled { color: var(--disabled-text-color); cursor: default; background: none; }
+        .icon-btn { padding: 6px; color: var(--secondary-text-color); }
+        .icon-btn ha-icon { --mdc-icon-size: 20px; display: block; }
+        .header { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+        .header .title { font-size: 16px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .empty { color: var(--secondary-text-color); }
-      </style>
-      <p class="hint">Click an overlay in the preview to select it, drag it to move it, or click the floorplan to place the selected overlay. Edit other settings in the code editor.</p>
+      </style>`;
+  }
+
+  _buildMainView() {
+    const root = this.shadowRoot;
+    root.innerHTML = `${this._styles()}
+      <div class="card-form"></div>
+      <h3>Overlays</h3>
+      <p class="hint">Click an overlay here or in the preview to edit it. In the preview, drag an overlay to move it.</p>
       <div class="list"></div>
-    `;
-    const list = root.querySelector('.list');
+      <div class="add"></div>`;
+    this._overlayForm = undefined;
+    this._cardForm = this._makeForm(CARD_SCHEMA, value => {
+      this._fireConfigChanged(cleanConfig({ ...value, overlays: this._config.overlays }));
+    });
+    root.querySelector('.card-form').append(this._cardForm);
+    const add = root.querySelector('.add');
+    for (const [type, label] of Object.entries(OVERLAY_TYPES)) {
+      const btn = document.createElement('button');
+      btn.textContent = `+ ${label}`;
+      btn.addEventListener('click', () => this._addOverlay(type));
+      add.append(btn);
+    }
+  }
+
+  _iconButton(icon, title, onClick, disabled) {
+    const btn = document.createElement('button');
+    btn.className = 'icon-btn';
+    btn.title = title;
+    btn.disabled = !!disabled;
+    const ic = document.createElement('ha-icon');
+    ic.icon = icon;
+    btn.append(ic);
+    btn.addEventListener('click', ev => { ev.stopPropagation(); onClick(); });
+    return btn;
+  }
+
+  _renderList() {
+    const list = this.shadowRoot.querySelector('.list');
+    const overlays = this._config.overlays ?? [];
+    list.replaceChildren();
     if (!overlays.length) {
-      list.innerHTML = '<p class="empty">No overlays configured.</p>';
+      list.innerHTML = '<p class="empty">No overlays yet.</p>';
       return;
     }
     overlays.forEach((cfg, index) => {
-      const row = document.createElement('button');
-      row.className = 'row' + (index === this._selected ? ' selected' : '');
+      const row = document.createElement('div');
+      row.className = 'row';
       const name = document.createElement('span');
       name.className = 'name';
       name.textContent = this._overlayName(cfg);
+      name.addEventListener('click', () => this._select(index));
       const pos = document.createElement('span');
       pos.className = 'pos';
       pos.textContent = `${cfg.x ?? '0'}, ${cfg.y ?? '0'}`;
-      row.append(name, pos);
-      if (!isMovableOverlay(cfg)) {
-        const fixed = document.createElement('span');
-        fixed.className = 'fixed';
-        fixed.textContent = 'not %';
-        fixed.title = 'Position is not in percent, so it cannot be dragged';
-        row.append(fixed);
-      }
-      row.addEventListener('click', () => this._select(index));
+      row.append(
+        name, pos,
+        this._iconButton('mdi:arrow-up', 'Move up', () => this._moveOverlay(index, -1), index === 0),
+        this._iconButton('mdi:arrow-down', 'Move down', () => this._moveOverlay(index, 1), index === overlays.length - 1),
+        this._iconButton('mdi:pencil', 'Edit', () => this._select(index)),
+        this._iconButton('mdi:delete', 'Delete', () => this._deleteOverlay(index)),
+      );
       list.append(row);
-
-      if (index === this._selected) list.append(this._renderDetail(cfg, index));
     });
   }
 
-  _renderDetail(cfg, index) {
-    const detail = document.createElement('div');
-    detail.className = 'detail';
-    const field = (axis) => {
-      const label = document.createElement('label');
-      label.textContent = axis;
-      const input = document.createElement('input');
-      input.value = String(cfg[axis] ?? '0');
-      input.addEventListener('change', () => {
-        const value = input.value.trim();
-        const current = this._config.overlays[index];
-        this._setPosition(index,
-          axis === 'x' ? value : current.x,
-          axis === 'y' ? value : current.y);
-      });
-      label.append(input);
-      return label;
-    };
-    const done = document.createElement('button');
-    done.textContent = 'Done';
-    done.addEventListener('click', () => this._select(undefined));
-    detail.append(field('x'), field('y'), done);
-    return detail;
+  _buildOverlayView(overlay) {
+    const root = this.shadowRoot;
+    root.innerHTML = `${this._styles()}
+      <div class="header"><span class="title"></span></div>
+      <p class="hint movable">Drag this overlay in the preview, or click the floorplan to place it.</p>
+      <div class="overlay-form"></div>`;
+    this._cardForm = undefined;
+    const header = root.querySelector('.header');
+    header.prepend(this._iconButton('mdi:arrow-left', 'Back', () => this._select(undefined)));
+    this._overlayTitle = root.querySelector('.title');
+    this._movableHint = root.querySelector('.movable');
+    const index = this._selected;
+    const schema = OVERLAY_SCHEMAS[overlay.type] ?? [POSITION_SCHEMA];
+    this._overlayForm = this._makeForm(schema, value => {
+      const overlays = [...(this._config.overlays ?? [])];
+      overlays[index] = cleanConfig({ ...value, type: overlay.type });
+      this._fireConfigChanged({ ...this._config, overlays });
+    });
+    root.querySelector('.overlay-form').append(this._overlayForm);
   }
 }
 customElements.define('floorplan-card-editor', FloorplanCardEditor);

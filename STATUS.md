@@ -65,7 +65,7 @@ Plan for floorplan-card (vanilla JS, no Lit/build):
 ## Next steps (agreed 2026-11-21)
 1. DONE: native state icon colours and action button theming tested and merged.
 2. DONE: step 2 built, verified and merged.
-3. Then step 1 (full editor forms), then step 3.
+3. DONE: step 1 (full editor forms) committed; initial tests pass, long test cycle under way. Then step 3.
 
 ## 2026-11-21 — Action button theming (merged to main)
 - Native state icon colours tested on device: working.
@@ -81,3 +81,12 @@ Plan for floorplan-card (vanilla JS, no Lit/build):
 - Only % (or unset) positions are draggable; others marked "not %".
 - HA rebuilds the preview card on every config change: SVG text now cached in memory per URL to avoid refetch/flicker.
 - Verified 2026-11-21: bridge reaches preview; select/drag/place work; save/discard correct; dashboard card unaffected; saved YAML clean.
+
+## 2026-11-21 — Visual editor step 1: full forms (committed; long test cycle under way)
+- Editor built on HA `ha-form` (loaded via card helpers if not yet defined).
+- Main view: card options (image, stylesheet, title, aspect_ratio; groups/style_rules as YAML fields), overlay list (edit, move up/down, delete), add State icon / State label / Action button (new overlays at 50%, 50%).
+- Overlay view (from list or preview click): back button, drag hint, per-type form: entity, icon, label, attribute, suffix, template, x/y/anchor/scale, visible_states, entity_picture, icon_map/color_map/style (YAML), tap/hold/double-tap via HA action picker.
+- Overlay actions now run through HA's `hass-action` event (same handler as built-in cards): adds perform-action, assist, confirmations; removes duplicate action code. `entity` may be on the action (legacy) or on the overlay. `url_target` no longer honoured (HA opens URLs in a new tab).
+- Empty fields removed from saved YAML.
+- `getStubConfig` added so the card can be added from the card picker.
+- To verify: forms load; edits update preview; add/reorder/delete; actions picker values work on dashboard (toggle, more-info, perform-action, navigate); existing YAML actions (incl. call-service, tap_action.entity) still work; saved YAML clean.
