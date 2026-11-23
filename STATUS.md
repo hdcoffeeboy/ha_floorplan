@@ -104,3 +104,7 @@ Plan for floorplan-card (vanilla JS, no Lit/build):
 - Repo made public. Validation failed: no licence (LICENSE was only on `hacs-release`; GitHub reads default branch) and no topics.
 - Merged `hacs-release` (incl. `editor-forms`) into main to fix licence. User to add GitHub topics + description, push, re-run validation.
 - Main now uses `custom:svg-floorplan-card`; update own dashboards' `type:` when deploying from main.
+
+## 2026-11-23 — HACS validation passed
+- Local `editor-forms` and `hacs-release` branches deleted (fully merged). Remote copies still on GitHub.
+- Remaining release steps: add `images/screenshot.png`, publish GitHub release v1.0.0, optionally submit to hacs/default after the test cycle.
